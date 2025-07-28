@@ -7,13 +7,13 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*};
 
-struct SpinLockWaiter {
-    pub next: AtomicPtr<SpinLockWaiter>,
-    pub locked: AtomicBool,
+pub struct SpinLockWaiter {
+    next: AtomicPtr<SpinLockWaiter>,
+    locked: AtomicBool,
 }
 
 impl SpinLockWaiter {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             next: AtomicPtr::new(ptr::null_mut()),
             locked: AtomicBool::new(false),
@@ -38,35 +38,31 @@ impl<T> SpinLock<T> {
 }
 
 impl<T: ?Sized> SpinLock<T> {
-    pub fn lock(&self) -> SpinLockGuard<T> {
-        let node = Box::into_raw(Box::new(SpinLockWaiter::new()));
-
+    pub fn lock<'a, 'b>(&'a self, node: &'b mut SpinLockWaiter) -> SpinLockGuard<'a, 'b, T> {
         let prev = self.tail.swap(node, Acquire);
+
         if !prev.is_null() {
-            // SAFETY: `prev` is obviously non-null. `node` is also non-null,
-            // which is guaranteed by `Box::into_raw()`. Additionally, `prev`
-            // will not dangle since the previous waiter would wait until we
-            // setup `next` and pass the lock to us before it cleans up.
+            // SAFETY: `prev` is obviously non-null.
             unsafe {
                 (*prev).next.store(node, Relaxed);
-                // spin until we load a true here
-                while !(*node).locked.load(Acquire) {
-                    hint::spin_loop();
-                }
+            }
+            // spin until we load a true here
+            while !node.locked.load(Acquire) {
+                hint::spin_loop();
             }
         }
         SpinLockGuard::new(self, node)
     }
 }
 
-pub struct SpinLockGuard<'a, T: ?Sized + 'a> {
+pub struct SpinLockGuard<'a, 'b, T: ?Sized + 'a> {
     lock: &'a self::SpinLock<T>,
-    waiter: *mut SpinLockWaiter,
+    waiter: &'b mut SpinLockWaiter,
     _phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: ?Sized> SpinLockGuard<'a, T> {
-    fn new(lock: &'a SpinLock<T>, waiter: *mut SpinLockWaiter) -> Self {
+impl<'a, 'b, T: ?Sized> SpinLockGuard<'a, 'b, T> {
+    fn new(lock: &'a SpinLock<T>, waiter: &'b mut SpinLockWaiter) -> Self {
         Self {
             lock,
             waiter,
@@ -75,7 +71,7 @@ impl<'a, T: ?Sized> SpinLockGuard<'a, T> {
     }
 }
 
-impl<T: ?Sized> Deref for SpinLockGuard<'_, T> {
+impl<T: ?Sized> Deref for SpinLockGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -84,14 +80,14 @@ impl<T: ?Sized> Deref for SpinLockGuard<'_, T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for SpinLockGuard<'_, T> {
+impl<T: ?Sized> DerefMut for SpinLockGuard<'_, '_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: `get()` never return a null pointer.
         unsafe { &mut *self.lock.value.get() }
     }
 }
 
-impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
+impl<T: ?Sized> Drop for SpinLockGuard<'_, '_, T> {
     fn drop(&mut self) {
         if self
             .lock
@@ -103,10 +99,7 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
             // Fail to reset `tail`, indicating that there is a new waiter here.
             // Loop until `next` pointer being set by the new waiter.
             loop {
-                // SAFETY: The raw pointer returned by Box::into_raw() is non-null.
-                unsafe {
-                    next = (*self.waiter).next.load(Relaxed);
-                }
+                next = self.waiter.next.load(Relaxed);
 
                 if !next.is_null() {
                     break;
@@ -118,10 +111,6 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
                 (*next).locked.store(true, Release);
             }
         }
-        // SAFETY: raw pointer returned by `Box::into_raw()` is non-null.
-        unsafe {
-            let _ = Box::from_raw(self.waiter);
-        }
     }
 }
 
@@ -132,17 +121,22 @@ mod tests {
 
     #[test]
     fn test1() {
-        let lock = SpinLock::new(0);
+        let sp = SpinLock::new(0);
 
         thread::scope(|s| {
-            s.spawn(|| *lock.lock() += 1);
             s.spawn(|| {
-                let mut g = lock.lock();
+                let mut node = SpinLockWaiter::new();
+                *sp.lock(&mut node) += 1;
+            });
+            s.spawn(|| {
+                let mut node = SpinLockWaiter::new();
+                let mut g = sp.lock(&mut node);
                 *g += 2;
             });
         });
 
-        let g = lock.lock();
+        let mut node = SpinLockWaiter::new();
+        let g = sp.lock(&mut node);
         assert_eq!(*g, 3);
     }
 
@@ -151,15 +145,20 @@ mod tests {
         let sp = SpinLock::new(Vec::new());
 
         thread::scope(|s| {
-            s.spawn(|| sp.lock().push(String::from("one")));
             s.spawn(|| {
-                let mut g = sp.lock();
+                let mut node = SpinLockWaiter::new();
+                sp.lock(&mut node).push(String::from("one"))
+            });
+            s.spawn(|| {
+                let mut node = SpinLockWaiter::new();
+                let mut g = sp.lock(&mut node);
                 g.push(String::from("two"));
                 g.push(String::from("two"));
             });
         });
 
-        let g = sp.lock();
+        let mut node = SpinLockWaiter::new();
+        let g = sp.lock(&mut node);
         let result1 = [
             String::from("one"),
             String::from("two"),
@@ -179,19 +178,22 @@ mod tests {
 
         thread::scope(|s| {
             s.spawn(|| {
-                let mut g = sp.lock();
+                let mut node = SpinLockWaiter::new();
+                let mut g = sp.lock(&mut node);
                 g.push("Rust");
                 g.push("C");
             });
             s.spawn(|| {
-                let mut g = sp.lock();
+                let mut node = SpinLockWaiter::new();
+                let mut g = sp.lock(&mut node);
                 g.push("apple");
                 g.push("banana");
                 g.push("orange");
             });
         });
 
-        let g = sp.lock();
+        let mut node = SpinLockWaiter::new();
+        let g = sp.lock(&mut node);
         let result1 = ["Rust", "C", "apple", "banana", "orange"];
         let result2 = ["apple", "banana", "orange", "Rust", "C"];
         assert!(g.as_slice() == &result1 || g.as_slice() == &result2);
@@ -203,11 +205,15 @@ mod tests {
 
         thread::scope(|s| {
             for _ in 0..10000 {
-                s.spawn(|| *sp.lock() += 1);
+                s.spawn(|| {
+                    let mut node = SpinLockWaiter::new();
+                    *sp.lock(&mut node) += 1
+                });
             }
         });
 
-        let g = sp.lock();
+        let mut node = SpinLockWaiter::new();
+        let g = sp.lock(&mut node);
         assert_eq!(*g, 10000);
     }
 
@@ -218,14 +224,21 @@ mod tests {
         thread::scope(|s| {
             for i in 0..20000 {
                 if i & 1 == 0 {
-                    s.spawn(|| *sp.lock() += 1);
+                    s.spawn(|| {
+                        let mut node = SpinLockWaiter::new();
+                        *sp.lock(&mut node) += 1
+                    });
                 } else {
-                    s.spawn(|| *sp.lock() -= 1);
+                    s.spawn(|| {
+                        let mut node = SpinLockWaiter::new();
+                        *sp.lock(&mut node) -= 1
+                    });
                 }
             }
         });
 
-        let g = sp.lock();
+        let mut node = SpinLockWaiter::new();
+        let g = sp.lock(&mut node);
         assert_eq!(*g, 0);
     }
 }
