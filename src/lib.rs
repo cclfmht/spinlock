@@ -46,7 +46,7 @@ impl<T: ?Sized> SpinLock<T> {
             unsafe {
                 (*prev).next.store(node, Relaxed);
             }
-            // spin until we load a true here
+            // Spin until we load a true here
             while !node.locked.load(Acquire) {
                 hint::spin_loop();
             }
@@ -89,13 +89,17 @@ impl<T: ?Sized> DerefMut for SpinLockGuard<'_, '_, T> {
 
 impl<T: ?Sized> Drop for SpinLockGuard<'_, '_, T> {
     fn drop(&mut self) {
-        if self
-            .lock
-            .tail
-            .compare_exchange(self.waiter, ptr::null_mut(), Release, Relaxed)
-            .is_err()
-        {
-            let mut next;
+        let mut next = self.waiter.next.load(Relaxed);
+
+        if next.is_null() {
+            if self
+                .lock
+                .tail
+                .compare_exchange(self.waiter, ptr::null_mut(), Release, Relaxed)
+                .is_ok()
+            {
+                return;
+            }
             // Fail to reset `tail`, indicating that there is a new waiter here.
             // Loop until `next` pointer being set by the new waiter.
             loop {
@@ -106,10 +110,10 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, '_, T> {
                 }
                 hint::spin_loop();
             }
-            // SAFETY: next is already set at this point.
-            unsafe {
-                (*next).locked.store(true, Release);
-            }
+        }
+        // SAFETY: next is already set at this point.
+        unsafe {
+            (*next).locked.store(true, Release);
         }
     }
 }

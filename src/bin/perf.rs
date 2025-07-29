@@ -3,7 +3,7 @@
 use spinlock::{SpinLock, SpinLockWaiter};
 use std::sync::atomic::{AtomicU64, Ordering::*};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn main() {
     let n = 1000;
