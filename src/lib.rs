@@ -5,7 +5,7 @@ use std::hint;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*, fence};
 
 pub struct SpinLockWaiter {
     next: AtomicPtr<SpinLockWaiter>,
@@ -46,19 +46,28 @@ impl<T: ?Sized> SpinLock<T> {
             unsafe {
                 (*prev).next.store(node, Relaxed);
             }
-            // Spin until we load a true here
-            while !node.locked.load(Acquire) {
-                hint::spin_loop();
-            }
+            // spinning
+            Self::lock_contended(node);
         }
+        // At this point, it's our turn to use the lock. Since we only
+        // use `Relaxed` order when spinning, put an `Acquire` fence here
+        // to synchronize with the release-store in SpinLockGuard::drop().
+        fence(Acquire);
         SpinLockGuard::new(self, node)
+    }
+
+    #[cold]
+    fn lock_contended(node: &mut SpinLockWaiter) {
+        while !node.locked.load(Relaxed) {
+            hint::spin_loop();
+        }
     }
 }
 
 pub struct SpinLockGuard<'a, 'b, T: ?Sized + 'a> {
-    lock: &'a self::SpinLock<T>,
+    lock: &'a SpinLock<T>,
     waiter: &'b mut SpinLockWaiter,
-    _phantom: PhantomData<&'a mut T>,
+    _marker: PhantomData<&'a mut T>,
 }
 
 impl<'a, 'b, T: ?Sized> SpinLockGuard<'a, 'b, T> {
@@ -66,7 +75,7 @@ impl<'a, 'b, T: ?Sized> SpinLockGuard<'a, 'b, T> {
         Self {
             lock,
             waiter,
-            _phantom: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
