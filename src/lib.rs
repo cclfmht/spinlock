@@ -7,12 +7,12 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*, fence};
 
-pub struct SpinLockWaiter {
-    next: AtomicPtr<SpinLockWaiter>,
+pub struct McsNode {
+    next: AtomicPtr<McsNode>,
     locked: AtomicBool,
 }
 
-impl SpinLockWaiter {
+impl McsNode {
     pub fn new() -> Self {
         Self {
             next: AtomicPtr::new(ptr::null_mut()),
@@ -21,14 +21,14 @@ impl SpinLockWaiter {
     }
 }
 
-pub struct SpinLock<T: ?Sized> {
-    tail: AtomicPtr<SpinLockWaiter>,
+pub struct McsLock<T: ?Sized> {
+    tail: AtomicPtr<McsNode>,
     value: UnsafeCell<T>,
 }
 
-unsafe impl<T: Send + ?Sized> Sync for SpinLock<T> {}
+unsafe impl<T: Send + ?Sized> Sync for McsLock<T> {}
 
-impl<T> SpinLock<T> {
+impl<T> McsLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             tail: AtomicPtr::new(ptr::null_mut()),
@@ -37,8 +37,8 @@ impl<T> SpinLock<T> {
     }
 }
 
-impl<T: ?Sized> SpinLock<T> {
-    pub fn lock<'a, 'b>(&'a self, node: &'b mut SpinLockWaiter) -> SpinLockGuard<'a, 'b, T> {
+impl<T: ?Sized> McsLock<T> {
+    pub fn lock<'a, 'b>(&'a self, node: &'b mut McsNode) -> McsLockGuard<'a, 'b, T> {
         let prev = self.tail.swap(node, Acquire);
 
         if !prev.is_null() {
@@ -51,27 +51,27 @@ impl<T: ?Sized> SpinLock<T> {
         }
         // At this point, it's our turn to use the lock. Since we only
         // use `Relaxed` order when spinning, put an `Acquire` fence here
-        // to synchronize with the release-store in SpinLockGuard::drop().
+        // to synchronize with the release-store in McsLockGuard::drop().
         fence(Acquire);
-        SpinLockGuard::new(self, node)
+        McsLockGuard::new(self, node)
     }
 
     #[cold]
-    fn lock_contended(node: &mut SpinLockWaiter) {
+    fn lock_contended(node: &mut McsNode) {
         while !node.locked.load(Relaxed) {
             hint::spin_loop();
         }
     }
 }
 
-pub struct SpinLockGuard<'a, 'b, T: ?Sized + 'a> {
-    lock: &'a SpinLock<T>,
-    waiter: &'b mut SpinLockWaiter,
+pub struct McsLockGuard<'a, 'b, T: ?Sized + 'a> {
+    lock: &'a McsLock<T>,
+    waiter: &'b mut McsNode,
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<'a, 'b, T: ?Sized> SpinLockGuard<'a, 'b, T> {
-    fn new(lock: &'a SpinLock<T>, waiter: &'b mut SpinLockWaiter) -> Self {
+impl<'a, 'b, T: ?Sized> McsLockGuard<'a, 'b, T> {
+    fn new(lock: &'a McsLock<T>, waiter: &'b mut McsNode) -> Self {
         Self {
             lock,
             waiter,
@@ -80,7 +80,7 @@ impl<'a, 'b, T: ?Sized> SpinLockGuard<'a, 'b, T> {
     }
 }
 
-impl<T: ?Sized> Deref for SpinLockGuard<'_, '_, T> {
+impl<T: ?Sized> Deref for McsLockGuard<'_, '_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -89,14 +89,14 @@ impl<T: ?Sized> Deref for SpinLockGuard<'_, '_, T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for SpinLockGuard<'_, '_, T> {
+impl<T: ?Sized> DerefMut for McsLockGuard<'_, '_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: `get()` never return a null pointer.
         unsafe { &mut *self.lock.value.get() }
     }
 }
 
-impl<T: ?Sized> Drop for SpinLockGuard<'_, '_, T> {
+impl<T: ?Sized> Drop for McsLockGuard<'_, '_, T> {
     fn drop(&mut self) {
         let mut next = self.waiter.next.load(Relaxed);
 
@@ -134,43 +134,43 @@ mod tests {
 
     #[test]
     fn test1() {
-        let sp = SpinLock::new(0);
+        let sp = McsLock::new(0);
 
         thread::scope(|s| {
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 *sp.lock(&mut node) += 1;
             });
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 let mut g = sp.lock(&mut node);
                 *g += 2;
             });
         });
 
-        let mut node = SpinLockWaiter::new();
+        let mut node = McsNode::new();
         let g = sp.lock(&mut node);
         assert_eq!(*g, 3);
     }
 
     #[test]
     fn test2() {
-        let sp = SpinLock::new(Vec::new());
+        let sp = McsLock::new(Vec::new());
 
         thread::scope(|s| {
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 sp.lock(&mut node).push(String::from("one"))
             });
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 let mut g = sp.lock(&mut node);
                 g.push(String::from("two"));
                 g.push(String::from("two"));
             });
         });
 
-        let mut node = SpinLockWaiter::new();
+        let mut node = McsNode::new();
         let g = sp.lock(&mut node);
         let result1 = [
             String::from("one"),
@@ -187,17 +187,17 @@ mod tests {
 
     #[test]
     fn test3() {
-        let sp = SpinLock::new(Vec::new());
+        let sp = McsLock::new(Vec::new());
 
         thread::scope(|s| {
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 let mut g = sp.lock(&mut node);
                 g.push("Rust");
                 g.push("C");
             });
             s.spawn(|| {
-                let mut node = SpinLockWaiter::new();
+                let mut node = McsNode::new();
                 let mut g = sp.lock(&mut node);
                 g.push("apple");
                 g.push("banana");
@@ -205,7 +205,7 @@ mod tests {
             });
         });
 
-        let mut node = SpinLockWaiter::new();
+        let mut node = McsNode::new();
         let g = sp.lock(&mut node);
         let result1 = ["Rust", "C", "apple", "banana", "orange"];
         let result2 = ["apple", "banana", "orange", "Rust", "C"];
@@ -214,43 +214,43 @@ mod tests {
 
     #[test]
     fn test4() {
-        let sp = SpinLock::new(0);
+        let sp = McsLock::new(0);
 
         thread::scope(|s| {
             for _ in 0..10000 {
                 s.spawn(|| {
-                    let mut node = SpinLockWaiter::new();
+                    let mut node = McsNode::new();
                     *sp.lock(&mut node) += 1
                 });
             }
         });
 
-        let mut node = SpinLockWaiter::new();
+        let mut node = McsNode::new();
         let g = sp.lock(&mut node);
         assert_eq!(*g, 10000);
     }
 
     #[test]
     fn test5() {
-        let sp = SpinLock::new(0);
+        let sp = McsLock::new(0);
 
         thread::scope(|s| {
             for i in 0..20000 {
                 if i & 1 == 0 {
                     s.spawn(|| {
-                        let mut node = SpinLockWaiter::new();
+                        let mut node = McsNode::new();
                         *sp.lock(&mut node) += 1
                     });
                 } else {
                     s.spawn(|| {
-                        let mut node = SpinLockWaiter::new();
+                        let mut node = McsNode::new();
                         *sp.lock(&mut node) -= 1
                     });
                 }
             }
         });
 
-        let mut node = SpinLockWaiter::new();
+        let mut node = McsNode::new();
         let g = sp.lock(&mut node);
         assert_eq!(*g, 0);
     }
