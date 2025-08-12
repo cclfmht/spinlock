@@ -66,15 +66,15 @@ impl<T: ?Sized> McsLock<T> {
 
 pub struct McsLockGuard<'a, 'b, T: ?Sized + 'a> {
     lock: &'a McsLock<T>,
-    waiter: &'b mut McsNode,
+    node: &'b mut McsNode,
     _marker: PhantomData<&'a mut T>,
 }
 
 impl<'a, 'b, T: ?Sized> McsLockGuard<'a, 'b, T> {
-    fn new(lock: &'a McsLock<T>, waiter: &'b mut McsNode) -> Self {
+    fn new(lock: &'a McsLock<T>, node: &'b mut McsNode) -> Self {
         Self {
             lock,
-            waiter,
+            node,
             _marker: PhantomData,
         }
     }
@@ -105,13 +105,13 @@ impl<T: ?Sized> Drop for McsLockGuard<'_, '_, T> {
         // unnecessarily claming exclusive accesses.
         //
         // See https://marabos.nl/atomics/hardware.html#failing-compare-exchange
-        let mut next = self.waiter.next.load(Relaxed);
+        let mut next = self.node.next.load(Relaxed);
 
         if next.is_null() {
             if self
                 .lock
                 .tail
-                .compare_exchange(self.waiter, ptr::null_mut(), Release, Relaxed)
+                .compare_exchange(self.node, ptr::null_mut(), Release, Relaxed)
                 .is_ok()
             {
                 return;
@@ -119,7 +119,7 @@ impl<T: ?Sized> Drop for McsLockGuard<'_, '_, T> {
             // Fail to reset `tail`, indicating that there is a new waiter here.
             // Loop until `next` pointer being set by the new waiter.
             loop {
-                next = self.waiter.next.load(Relaxed);
+                next = self.node.next.load(Relaxed);
 
                 if !next.is_null() {
                     break;
