@@ -98,6 +98,13 @@ impl<T: ?Sized> DerefMut for McsLockGuard<'_, '_, T> {
 
 impl<T: ?Sized> Drop for McsLockGuard<'_, '_, T> {
     fn drop(&mut self) {
+        // In fact, removing this `load()` will not affect the correctness. On most
+        // architectures, however, `compare_exchange()` requires exclusive access to
+        // the relevant cacheline regardless of whether the comparison succeeds or
+        // not, so manually loading and checking before `compare_exchange()` avoids
+        // unnecessarily claming exclusive accesses.
+        //
+        // See https://marabos.nl/atomics/hardware.html#failing-compare-exchange
         let mut next = self.waiter.next.load(Relaxed);
 
         if next.is_null() {
