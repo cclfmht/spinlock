@@ -48,11 +48,11 @@ impl<T: ?Sized> McsLock<T> {
             }
             // spinning
             Self::lock_contended(node);
+            // At this point, it's our turn to use the lock. Since we only
+            // use `Relaxed` order when spinning, put an `Acquire` fence here
+            // to synchronize with the release-store in McsLockGuard::drop().
+            fence(Acquire);
         }
-        // At this point, it's our turn to use the lock. Since we only
-        // use `Relaxed` order when spinning, put an `Acquire` fence here
-        // to synchronize with the release-store in McsLockGuard::drop().
-        fence(Acquire);
         McsLockGuard::new(self, node)
     }
 
