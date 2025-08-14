@@ -38,6 +38,18 @@ impl<T> McsLock<T> {
 }
 
 impl<T: ?Sized> McsLock<T> {
+    pub fn try_lock<'a, 'b>(&'a self, node: &'b mut McsNode) -> Option<McsLockGuard<'a, 'b, T>> {
+        if self
+            .tail
+            .compare_exchange(ptr::null_mut(), node, Acquire, Relaxed)
+            .is_ok()
+        {
+            Some(McsLockGuard::new(self, node))
+        } else {
+            None
+        }
+    }
+
     pub fn lock<'a, 'b>(&'a self, node: &'b mut McsNode) -> McsLockGuard<'a, 'b, T> {
         let prev = self.tail.swap(node, Acquire);
 
