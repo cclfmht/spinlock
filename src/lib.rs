@@ -152,7 +152,7 @@ mod tests {
     use std::thread;
 
     #[test]
-    fn test1() {
+    fn shared_counter_1() {
         let sp = McsLock::new(0);
 
         thread::scope(|s| {
@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn test2() {
+    fn shared_vec_1() {
         let sp = McsLock::new(Vec::new());
 
         thread::scope(|s| {
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test3() {
+    fn shared_vec_2() {
         let sp = McsLock::new(Vec::new());
 
         thread::scope(|s| {
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test4() {
+    fn shared_counter_2() {
         let sp = McsLock::new(0);
 
         thread::scope(|s| {
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn test5() {
+    fn shared_counter_3() {
         let sp = McsLock::new(0);
 
         thread::scope(|s| {
