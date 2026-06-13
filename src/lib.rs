@@ -38,7 +38,10 @@ impl<T> McsLock<T> {
 }
 
 impl<T: ?Sized> McsLock<T> {
-    pub fn try_lock<'a, 'b>(&'a self, node: &'b mut McsNode) -> Option<McsLockGuard<'a, 'b, T>> {
+    pub fn try_lock<'lock, 'node>(
+        &'lock self,
+        node: &'node mut McsNode,
+    ) -> Option<McsLockGuard<'lock, 'node, T>> {
         if self
             .tail
             .compare_exchange(ptr::null_mut(), node, Acquire, Relaxed)
@@ -50,7 +53,10 @@ impl<T: ?Sized> McsLock<T> {
         }
     }
 
-    pub fn lock<'a, 'b>(&'a self, node: &'b mut McsNode) -> McsLockGuard<'a, 'b, T> {
+    pub fn lock<'lock, 'node>(
+        &'lock self,
+        node: &'node mut McsNode,
+    ) -> McsLockGuard<'lock, 'node, T> {
         let prev = self.tail.swap(node, Acquire);
 
         if !prev.is_null() {
@@ -76,14 +82,14 @@ impl<T: ?Sized> McsLock<T> {
     }
 }
 
-pub struct McsLockGuard<'a, 'b, T: ?Sized + 'a> {
-    lock: &'a McsLock<T>,
-    node: &'b mut McsNode,
-    _marker: PhantomData<&'a mut T>,
+pub struct McsLockGuard<'lock, 'node, T: ?Sized + 'lock> {
+    lock: &'lock McsLock<T>,
+    node: &'node mut McsNode,
+    _marker: PhantomData<&'lock mut T>,
 }
 
-impl<'a, 'b, T: ?Sized> McsLockGuard<'a, 'b, T> {
-    fn new(lock: &'a McsLock<T>, node: &'b mut McsNode) -> Self {
+impl<'lock, 'node, T: ?Sized> McsLockGuard<'lock, 'node, T> {
+    fn new(lock: &'lock McsLock<T>, node: &'node mut McsNode) -> Self {
         Self {
             lock,
             node,
