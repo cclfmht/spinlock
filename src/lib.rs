@@ -42,8 +42,7 @@ impl<T: ?Sized> McsLock<T> {
         &'lock self,
         node: &'node mut McsNode,
     ) -> Option<McsLockGuard<'lock, 'node, T>> {
-        *node.next.get_mut() = ptr::null_mut();
-        *node.locked.get_mut() = false;
+        Self::init_node(node);
 
         if self
             .tail
@@ -60,8 +59,7 @@ impl<T: ?Sized> McsLock<T> {
         &'lock self,
         node: &'node mut McsNode,
     ) -> McsLockGuard<'lock, 'node, T> {
-        *node.next.get_mut() = ptr::null_mut();
-        *node.locked.get_mut() = false;
+        Self::init_node(node);
 
         // If thread A sets `tail` with its node and then thread B loads that value, then the
         // initialization of A's node should be visible to B at this point so that we can safely
@@ -84,6 +82,11 @@ impl<T: ?Sized> McsLock<T> {
             fence(Acquire);
         }
         McsLockGuard::new(self, node)
+    }
+
+    fn init_node(node: &mut McsNode) {
+        *node.next.get_mut() = ptr::null_mut();
+        *node.locked.get_mut() = false;
     }
 
     #[cold]
