@@ -42,6 +42,9 @@ impl<T: ?Sized> McsLock<T> {
         &'lock self,
         node: &'node mut McsNode,
     ) -> Option<McsLockGuard<'lock, 'node, T>> {
+        *node.next.get_mut() = ptr::null_mut();
+        *node.locked.get_mut() = false;
+
         if self
             .tail
             .compare_exchange(ptr::null_mut(), node, AcqRel, Relaxed)
@@ -61,7 +64,7 @@ impl<T: ?Sized> McsLock<T> {
         *node.locked.get_mut() = false;
 
         // If thread A sets `tail` with its node and then thread B loads that value, then the
-        // intialization of A's node should be visible to B at this point so that we can safely
+        // initialization of A's node should be visible to B at this point so that we can safely
         // set `next` on that node later. Thus, we need to establish a happens-before relationship
         // between the store in A and the load in B.
         let prev = self.tail.swap(node, AcqRel);
@@ -251,9 +254,10 @@ mod tests {
     #[test]
     fn shared_counter_2() {
         let sp = McsLock::new(0);
+        let num_threads = 1000;
 
         thread::scope(|s| {
-            for _ in 0..10000 {
+            for _ in 0..num_threads {
                 s.spawn(|| {
                     let mut node = McsNode::new();
                     *sp.lock(&mut node) += 1
@@ -263,7 +267,7 @@ mod tests {
 
         let mut node = McsNode::new();
         let g = sp.lock(&mut node);
-        assert_eq!(*g, 10000);
+        assert_eq!(*g, num_threads);
     }
 
     #[test]
@@ -271,21 +275,18 @@ mod tests {
         let sp = McsLock::new(0);
 
         thread::scope(|s| {
-            for i in 0..20000 {
-                if i & 1 == 0 {
-                    s.spawn(|| {
-                        let mut node = McsNode::new();
-                        *sp.lock(&mut node) += 1;
-                        *sp.lock(&mut node) += 1;
-                    });
-                } else {
-                    s.spawn(|| {
-                        let mut node = McsNode::new();
-                        *sp.lock(&mut node) -= 1;
-                        *sp.lock(&mut node) -= 1;
-                    });
+            s.spawn(|| {
+                let mut node = McsNode::new();
+                for _ in 0..10000 {
+                    *sp.lock(&mut node) += 1;
                 }
-            }
+            });
+            s.spawn(|| {
+                let mut node = McsNode::new();
+                for _ in 0..10000 {
+                    *sp.lock(&mut node) -= 1;
+                }
+            });
         });
 
         let mut node = McsNode::new();
