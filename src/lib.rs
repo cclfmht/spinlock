@@ -72,7 +72,7 @@ impl<T: ?Sized> McsLock<T> {
         if !prev.is_null() {
             // SAFETY: `prev` is obviously non-null.
             unsafe {
-                // When the previous node loads `next` set by us on its node, the intializatoin of
+                // When the previous node loads `next` set by us on its node, the initialization of
                 // our node should be visible to it so that it can safely set `locked` on our node.
                 (*prev).next.store(node, Release);
             }
