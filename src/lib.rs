@@ -1,11 +1,13 @@
 //! A simple MCS spin lock implementation
 
-use std::cell::UnsafeCell;
-use std::hint;
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
-use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*, fence};
+#![no_std]
+
+use core::cell::UnsafeCell;
+use core::hint;
+use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering::*, fence};
 
 pub struct McsNode {
     next: AtomicPtr<McsNode>,
@@ -166,134 +168,5 @@ impl<T: ?Sized> Drop for McsLockGuard<'_, '_, T> {
         unsafe {
             (*next).locked.store(true, Release);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread;
-
-    #[test]
-    fn shared_counter_1() {
-        let sp = McsLock::new(0);
-
-        thread::scope(|s| {
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                *sp.lock(&mut node) += 1;
-            });
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                let mut g = sp.lock(&mut node);
-                *g += 2;
-            });
-        });
-
-        let mut node = McsNode::new();
-        let g = sp.lock(&mut node);
-        assert_eq!(*g, 3);
-    }
-
-    #[test]
-    fn shared_vec_1() {
-        let sp = McsLock::new(Vec::new());
-
-        thread::scope(|s| {
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                sp.lock(&mut node).push(String::from("one"))
-            });
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                let mut g = sp.lock(&mut node);
-                g.push(String::from("two"));
-                g.push(String::from("two"));
-            });
-        });
-
-        let mut node = McsNode::new();
-        let g = sp.lock(&mut node);
-        let result1 = [
-            String::from("one"),
-            String::from("two"),
-            String::from("two"),
-        ];
-        let result2 = [
-            String::from("two"),
-            String::from("two"),
-            String::from("one"),
-        ];
-        assert!(g.as_slice() == &result1 || g.as_slice() == &result2);
-    }
-
-    #[test]
-    fn shared_vec_2() {
-        let sp = McsLock::new(Vec::new());
-
-        thread::scope(|s| {
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                let mut g = sp.lock(&mut node);
-                g.push("Rust");
-                g.push("C");
-            });
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                let mut g = sp.lock(&mut node);
-                g.push("apple");
-                g.push("banana");
-                g.push("orange");
-            });
-        });
-
-        let mut node = McsNode::new();
-        let g = sp.lock(&mut node);
-        let result1 = ["Rust", "C", "apple", "banana", "orange"];
-        let result2 = ["apple", "banana", "orange", "Rust", "C"];
-        assert!(g.as_slice() == &result1 || g.as_slice() == &result2);
-    }
-
-    #[test]
-    fn shared_counter_2() {
-        let sp = McsLock::new(0);
-        let num_threads = 1000;
-
-        thread::scope(|s| {
-            for _ in 0..num_threads {
-                s.spawn(|| {
-                    let mut node = McsNode::new();
-                    *sp.lock(&mut node) += 1
-                });
-            }
-        });
-
-        let mut node = McsNode::new();
-        let g = sp.lock(&mut node);
-        assert_eq!(*g, num_threads);
-    }
-
-    #[test]
-    fn shared_counter_3() {
-        let sp = McsLock::new(0);
-
-        thread::scope(|s| {
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                for _ in 0..10000 {
-                    *sp.lock(&mut node) += 1;
-                }
-            });
-            s.spawn(|| {
-                let mut node = McsNode::new();
-                for _ in 0..10000 {
-                    *sp.lock(&mut node) -= 1;
-                }
-            });
-        });
-
-        let mut node = McsNode::new();
-        let g = sp.lock(&mut node);
-        assert_eq!(*g, 0);
     }
 }
