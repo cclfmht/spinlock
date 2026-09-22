@@ -29,7 +29,7 @@ pub struct McsLock<T: ?Sized> {
 unsafe impl<T: Send + ?Sized> Sync for McsLock<T> {}
 
 impl<T> McsLock<T> {
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
             tail: AtomicPtr::new(ptr::null_mut()),
             value: UnsafeCell::new(value),
