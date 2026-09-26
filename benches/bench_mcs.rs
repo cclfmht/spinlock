@@ -1,3 +1,4 @@
+use core_affinity::{self, CoreId, get_core_ids, set_for_current};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 use spinlock::{McsLock, McsNode};
@@ -5,12 +6,23 @@ use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::{Arc, Barrier, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const NUMS_THREADS: [usize; 5] = [1, 2, 4, 8, 16];
 /// Times of entering critical section in each iteration.
 const NUM_CS_PER_ITERS: u32 = 100_000;
+
+/// Spawn a thread and pin it to a CPU core. The given routine `f` is only executed if we
+/// successfully pinned the thread to the specified core.
+fn spawn_on_core<F, T>(core_id: CoreId, f: F) -> JoinHandle<Option<T>>
+where
+    F: FnOnce() -> T,
+    F: Send + 'static,
+    T: Send + 'static,
+{
+    thread::spawn(move || set_for_current(core_id).then(f))
+}
 
 fn bench_mcs<'a, 'crit>(group: &'a mut BenchmarkGroup<'crit, WallTime>, n_threads: usize) {
     let mcs = Arc::new(McsLock::new(0));
@@ -18,14 +30,15 @@ fn bench_mcs<'a, 'crit>(group: &'a mut BenchmarkGroup<'crit, WallTime>, n_thread
     let barrier_end = Arc::new(Barrier::new(n_threads + 1));
     let done = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(n_threads);
+    let core_ids = get_core_ids().unwrap();
 
-    for _ in 0..n_threads {
+    for core_id in &core_ids[..n_threads] {
         let mcs_clone = Arc::clone(&mcs);
         let barrier_start_clone = Arc::clone(&barrier_start);
         let barrier_end_clone = Arc::clone(&barrier_end);
         let done_clone = Arc::clone(&done);
 
-        workers.push(thread::spawn(move || {
+        workers.push(spawn_on_core(*core_id, move || {
             let mut node = McsNode::new();
 
             while !done_clone.load(Acquire) {
@@ -37,6 +50,12 @@ fn bench_mcs<'a, 'crit>(group: &'a mut BenchmarkGroup<'crit, WallTime>, n_thread
                 barrier_end_clone.wait();
             }
         }));
+    }
+
+    // Worker threads should all be stucked at the barriers at this point; otherwise, it didn't be
+    // pinned on the specified CPU core successfully.
+    if workers.iter().any(|h| h.is_finished()) {
+        panic!("Failed to set CPU affinity");
     }
 
     group.bench_function(BenchmarkId::new("mcs", ""), |b| {
@@ -63,14 +82,15 @@ fn bench_mutex<'a, 'crit>(group: &'a mut BenchmarkGroup<'crit, WallTime>, n_thre
     let barrier_end = Arc::new(Barrier::new(n_threads + 1));
     let done = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(n_threads);
+    let core_ids = get_core_ids().unwrap();
 
-    for _ in 0..n_threads {
+    for core_id in &core_ids[..n_threads] {
         let mutex_clone = Arc::clone(&mutex);
         let barrier_start_clone = Arc::clone(&barrier_start);
         let barrier_end_clone = Arc::clone(&barrier_end);
         let done_clone = Arc::clone(&done);
 
-        workers.push(thread::spawn(move || {
+        workers.push(spawn_on_core(*core_id, move || {
             while !done_clone.load(Acquire) {
                 barrier_start_clone.wait();
                 for _ in 0..NUM_CS_PER_ITERS {
@@ -80,6 +100,12 @@ fn bench_mutex<'a, 'crit>(group: &'a mut BenchmarkGroup<'crit, WallTime>, n_thre
                 barrier_end_clone.wait();
             }
         }));
+    }
+
+    // Worker threads should all be stucked at the barriers at this point; otherwise, it didn't be
+    // pinned on the specified CPU core successfully.
+    if workers.iter().any(|h| h.is_finished()) {
+        panic!("Failed to set CPU affinity");
     }
 
     group.bench_function(BenchmarkId::new("mutex", ""), |b| {
