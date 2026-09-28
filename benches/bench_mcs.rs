@@ -5,7 +5,7 @@ use spinlock::{McsLock, McsNode};
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -83,7 +83,8 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
     let lck = Arc::new(lock);
     let barrier_start = Arc::new(Barrier::new(n_threads + 1));
     let barrier_end = Arc::new(Barrier::new(n_threads + 1));
-    let done = Arc::new(AtomicBool::new(false));
+    let pair = Arc::new((Condvar::new(), Mutex::new(true)));
+    let next = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(n_threads);
     let core_ids = get_core_ids().unwrap();
 
@@ -91,12 +92,25 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
         let lck_clone = Arc::clone(&lck);
         let barrier_start_clone = Arc::clone(&barrier_start);
         let barrier_end_clone = Arc::clone(&barrier_end);
-        let done_clone = Arc::clone(&done);
+        let pair_clone = Arc::clone(&pair);
+        let next_clone = Arc::clone(&next);
 
         workers.push(spawn_on_core(*core_id, move || {
             let mut init_data = lck_clone.init();
+            let (cv, mutex) = &*pair_clone;
 
-            while !done_clone.load(Acquire) {
+            loop {
+                // We need to unlock immediately. It will cause deadlock if we hold the lock and
+                // wait the main thread at the end barrier because main thread will attempt to grab
+                // this lock again before arriving end barrier.
+                {
+                    let _guard = cv
+                        .wait_while(mutex.lock().unwrap(), |pending| *pending)
+                        .unwrap();
+                }
+                if !next_clone.load(Acquire) {
+                    break;
+                }
                 barrier_start_clone.wait();
                 lck_clone.work(&mut init_data);
                 barrier_end_clone.wait();
@@ -110,22 +124,34 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
         panic!("Failed to set CPU affinity");
     }
 
+    let (cv, mutex) = &*pair;
     group.bench_function(BenchmarkId::new(lck.name(), ""), |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
 
             for _ in 0..iters {
+                next.store(true, Release);
+                *mutex.lock().unwrap() = false;
+                cv.notify_all();
+
                 barrier_start.wait();
                 let start = Instant::now();
+                *mutex.lock().unwrap() = true;
                 barrier_end.wait();
+
                 total += start.elapsed();
             }
             total
         })
     });
 
-    // Notify the end of benchmark. This causes the worker threads to terminate.
-    done.store(true, Release);
+    next.store(false, Release);
+    *mutex.lock().unwrap() = false;
+    cv.notify_all();
+
+    for worker in workers {
+        let _ = worker.join();
+    }
 }
 
 fn bench(c: &mut Criterion) {
