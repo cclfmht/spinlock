@@ -83,7 +83,7 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
     let lck = Arc::new(lock);
     let barrier_start = Arc::new(Barrier::new(n_threads + 1));
     let barrier_end = Arc::new(Barrier::new(n_threads + 1));
-    let pair = Arc::new((Condvar::new(), Mutex::new(true)));
+    let pair_notify_next = Arc::new((Condvar::new(), Mutex::new(true)));
     let next = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(n_threads);
     let core_ids = get_core_ids().unwrap();
@@ -92,12 +92,12 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
         let lck_clone = Arc::clone(&lck);
         let barrier_start_clone = Arc::clone(&barrier_start);
         let barrier_end_clone = Arc::clone(&barrier_end);
-        let pair_clone = Arc::clone(&pair);
+        let pair_notify_next_clone = Arc::clone(&pair_notify_next);
         let next_clone = Arc::clone(&next);
 
         workers.push(spawn_on_core(*core_id, move || {
             let mut init_data = lck_clone.init();
-            let (cv, mutex) = &*pair_clone;
+            let (cv, mutex) = &*pair_notify_next_clone;
 
             loop {
                 // We need to unlock immediately. It will cause deadlock if we hold the lock and
@@ -108,9 +108,11 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
                         .wait_while(mutex.lock().unwrap(), |pending| *pending)
                         .unwrap();
                 }
+
                 if !next_clone.load(Acquire) {
                     break;
                 }
+
                 barrier_start_clone.wait();
                 lck_clone.work(&mut init_data);
                 barrier_end_clone.wait();
@@ -118,13 +120,13 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
         }));
     }
 
-    // Worker threads should all be stucked at the barriers at this point; otherwise, it didn't be
-    // pinned on the specified CPU core successfully.
+    // Worker threads should all be waiting on the condition variable at this point; otherwise, it
+    // didn't get pinned on the specified CPU core successfully.
     if workers.iter().any(|h| h.is_finished()) {
         panic!("Failed to set CPU affinity");
     }
 
-    let (cv, mutex) = &*pair;
+    let (cv, mutex) = &*pair_notify_next;
     group.bench_function(BenchmarkId::new(lck.name(), ""), |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
