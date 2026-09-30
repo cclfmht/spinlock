@@ -4,7 +4,7 @@ use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criteri
 use spinlock::{McsLock, McsNode};
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::{Acquire, Release};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -64,15 +64,45 @@ impl BenchableLock for Mutex<i32> {
     }
 }
 
-/// Spawn a thread and pin it to a CPU core. The given routine `f` is only executed if we
-/// successfully pinned the thread to the specified core.
-fn spawn_on_core<F, T>(core_id: CoreId, f: F) -> JoinHandle<Option<T>>
+type SpawnResult<T> = Result<JoinHandle<T>, ()>;
+
+/// Spawn a thread and pin it to a CPU core. If the thread is pinned successfully, `f` is executed
+/// and an `Ok(JoinHandle<T>)` is returned; otherwise, returns an `Err(())`.
+fn spawn_on_core<F, T>(core_id: CoreId, f: F) -> SpawnResult<T>
 where
     F: FnOnce() -> T,
     F: Send + 'static,
     T: Send + 'static,
 {
-    thread::spawn(move || set_for_current(core_id).then(f))
+    let pair = Arc::new((Condvar::new(), Mutex::new(true)));
+    let success = Arc::new(AtomicBool::new(true));
+
+    let pair_clone = Arc::clone(&pair);
+    let success_clone = Arc::clone(&success);
+    let handle = thread::spawn(move || {
+        let (cv, mutex) = &*pair_clone;
+
+        if set_for_current(core_id) {
+            *mutex.lock().unwrap() = false;
+            cv.notify_one();
+            f()
+        } else {
+            success_clone.store(false, Relaxed);
+            *mutex.lock().unwrap() = false;
+            cv.notify_one();
+            panic!()
+        }
+    });
+
+    let (cv, mutex) = &*pair;
+    {
+        let _guard = cv.wait_while(mutex.lock().unwrap(), |pending| *pending);
+    }
+    if success.load(Relaxed) {
+        Ok(handle)
+    } else {
+        Err(())
+    }
 }
 
 fn bench_lock<'a, 'crit, L: BenchableLock>(
@@ -95,35 +125,32 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
         let pair_notify_next_clone = Arc::clone(&pair_notify_next);
         let next_clone = Arc::clone(&next);
 
-        workers.push(spawn_on_core(*core_id, move || {
-            let mut init_data = lck_clone.init();
-            let (cv, mutex) = &*pair_notify_next_clone;
+        workers.push(
+            spawn_on_core(*core_id, move || {
+                let mut init_data = lck_clone.init();
+                let (cv, mutex) = &*pair_notify_next_clone;
 
-            loop {
-                // We need to unlock immediately. It will cause deadlock if we hold the lock and
-                // wait the main thread at the end barrier because main thread will attempt to grab
-                // this lock again before arriving end barrier.
-                {
-                    let _guard = cv
-                        .wait_while(mutex.lock().unwrap(), |pending| *pending)
-                        .unwrap();
+                loop {
+                    // We need to unlock immediately. It will cause deadlock if we hold the lock and
+                    // wait the main thread at the end barrier because main thread will attempt to grab
+                    // this lock again before arriving end barrier.
+                    {
+                        let _guard = cv
+                            .wait_while(mutex.lock().unwrap(), |pending| *pending)
+                            .unwrap();
+                    }
+
+                    if !next_clone.load(Acquire) {
+                        break;
+                    }
+
+                    barrier_start_clone.wait();
+                    lck_clone.work(&mut init_data);
+                    barrier_end_clone.wait();
                 }
-
-                if !next_clone.load(Acquire) {
-                    break;
-                }
-
-                barrier_start_clone.wait();
-                lck_clone.work(&mut init_data);
-                barrier_end_clone.wait();
-            }
-        }));
-    }
-
-    // Worker threads should all be waiting on the condition variable at this point; otherwise, it
-    // didn't get pinned on the specified CPU core successfully.
-    if workers.iter().any(|h| h.is_finished()) {
-        panic!("Failed to set CPU affinity");
+            })
+            .expect("Failed to set CPU affinity on the worker thread"),
+        );
     }
 
     let (cv, mutex) = &*pair_notify_next;
