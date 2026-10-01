@@ -6,6 +6,7 @@ edition = "2024"
 [dev-dependencies]
 core_affinity = "0.8.3"
 criterion = { version = "0.8.2", features = ["html_reports"] }
+oneshot = { version = "0.2.1", features = ["std"] }
 
 [[bench]]
 name = "bench_mcs"

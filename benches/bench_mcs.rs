@@ -1,10 +1,11 @@
 use core_affinity::{self, CoreId, get_core_ids, set_for_current};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
+use oneshot;
 use spinlock::{McsLock, McsNode};
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -74,31 +75,19 @@ where
     F: Send + 'static,
     T: Send + 'static,
 {
-    let pair = Arc::new((Condvar::new(), Mutex::new(true)));
-    let success = Arc::new(AtomicBool::new(true));
+    let (tx, rx) = oneshot::channel();
 
-    let pair_clone = Arc::clone(&pair);
-    let success_clone = Arc::clone(&success);
     let handle = thread::spawn(move || {
-        let (cv, mutex) = &*pair_clone;
-
         if set_for_current(core_id) {
-            *mutex.lock().unwrap() = false;
-            cv.notify_one();
+            tx.send(true).unwrap();
             f()
         } else {
-            success_clone.store(false, Relaxed);
-            *mutex.lock().unwrap() = false;
-            cv.notify_one();
+            tx.send(false).unwrap();
             panic!()
         }
     });
 
-    let (cv, mutex) = &*pair;
-    {
-        let _guard = cv.wait_while(mutex.lock().unwrap(), |pending| *pending);
-    }
-    if success.load(Relaxed) {
+    if rx.recv().unwrap() {
         Ok(handle)
     } else {
         Err(())
