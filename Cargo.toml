@@ -3,10 +3,8 @@ name = "spinlock"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-core_affinity = "0.8.3"
-
 [dev-dependencies]
+core_affinity = "0.8.3"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [[bench]]
