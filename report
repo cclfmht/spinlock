@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Open Criterion report
+
+CRITERION_REPORT_PATH="target/criterion/report/index.html"
+
+if [ -f "${CRITERION_REPORT_PATH}" ]; then
+  open target/criterion/report/index.html &> /dev/null
+else
+  echo "[ERROR] Report not found at ${CRITERION_REPORT_PATH}. Please run the benchmark first."
+fi
