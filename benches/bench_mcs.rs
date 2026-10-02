@@ -11,8 +11,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const NUMS_THREADS: [usize; 5] = [1, 2, 4, 8, 16];
-/// Times of entering critical section in each iteration.
-const NUM_CS_PER_ITERS: u32 = 100_000;
+/// Times of entering critical section in each task.
+const NUM_CS_PER_TASK: u32 = 100_000;
 
 /// The locks implementing this trait can be benchmarked
 trait BenchableLock: Send + Sync + 'static {
@@ -24,15 +24,15 @@ trait BenchableLock: Send + Sync + 'static {
         Self::NAME
     }
 
-    /// Initialization before starting work. This is primarily for MCS spinlock to initialize its
+    /// Initialization before starting task. This is primarily for MCS spinlock to initialize its
     /// nodes.
     fn init(&self) -> Self::InitData;
 
-    /// Multiple threads will be assigned this work, and the time taken for all worker threads to
-    /// finish this work will be measured. That is called "one iteration", from the perspective of
+    /// Multiple threads will be assigned this task, and the time taken for all worker threads to
+    /// finish this task will be measured. That is called "one iteration", from the perspective of
     /// Criterion. See its [guide](https://criterion-rs.github.io/book/analysis.html#measurement)
     /// for more information.
-    fn work(&self, init_data: &mut Self::InitData);
+    fn task(&self, init_data: &mut Self::InitData);
 }
 
 impl BenchableLock for McsLock<i32> {
@@ -43,8 +43,8 @@ impl BenchableLock for McsLock<i32> {
         McsNode::new()
     }
 
-    fn work(&self, init_data: &mut Self::InitData) {
-        for _ in 0..NUM_CS_PER_ITERS {
+    fn task(&self, init_data: &mut Self::InitData) {
+        for _ in 0..NUM_CS_PER_TASK {
             let mut g = self.lock(init_data);
             *g = black_box(*g + 1);
         }
@@ -57,8 +57,8 @@ impl BenchableLock for Mutex<i32> {
 
     fn init(&self) -> Self::InitData {}
 
-    fn work(&self, _init_data: &mut Self::InitData) {
-        for _ in 0..NUM_CS_PER_ITERS {
+    fn task(&self, _init_data: &mut Self::InitData) {
+        for _ in 0..NUM_CS_PER_TASK {
             let mut g = self.lock().unwrap();
             *g = black_box(*g + 1);
         }
@@ -100,12 +100,13 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
     n_threads: usize,
 ) {
     let lck = Arc::new(lock);
+    let mut workers = Vec::with_capacity(n_threads);
+    let core_ids = get_core_ids().unwrap();
+    // These are used to sync main thread and worker threads at each measurement.
     let barrier_start = Arc::new(Barrier::new(n_threads + 1));
     let barrier_end = Arc::new(Barrier::new(n_threads + 1));
     let pair_notify_next = Arc::new((Condvar::new(), Mutex::new(true)));
     let next = Arc::new(AtomicBool::new(false));
-    let mut workers = Vec::with_capacity(n_threads);
-    let core_ids = get_core_ids().unwrap();
 
     for core_id in &core_ids[..n_threads] {
         let lck_clone = Arc::clone(&lck);
@@ -122,7 +123,7 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
                 loop {
                     // We need to unlock immediately. It will cause deadlock if we hold the lock and
                     // wait the main thread at the end barrier because main thread will attempt to grab
-                    // this lock again before arriving end barrier.
+                    // this lock again before arriving the end barrier.
                     {
                         let _guard = cv
                             .wait_while(mutex.lock().unwrap(), |pending| *pending)
@@ -134,7 +135,7 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
                     }
 
                     barrier_start_clone.wait();
-                    lck_clone.work(&mut init_data);
+                    lck_clone.task(&mut init_data);
                     barrier_end_clone.wait();
                 }
             })
@@ -154,6 +155,8 @@ fn bench_lock<'a, 'crit, L: BenchableLock>(
 
                 barrier_start.wait();
                 let start = Instant::now();
+                // Reset to pending state before reaching the end barrier. This will prevent workers
+                // from reading the old `next` after passing the end barrier.
                 *mutex.lock().unwrap() = true;
                 barrier_end.wait();
 
